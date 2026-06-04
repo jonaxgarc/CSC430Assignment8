@@ -1,19 +1,28 @@
-# Assignment 8 - Recreating the C Language in Racket
+# Assignment 8 - C-like Language in Typed Racket
 
 ## Overview
-This project recreates the Assignment 4 interpreter style in Typed Racket. It implements a small VEBG-style language with parsing, interpretation, mutation, primitive operations, and array-backed memory.
+This project implements a small C-like language using Typed Racket. The source language uses Racket s-expressions so parsing stays manageable, but the supported features are based on core C ideas.
 
-> [!NOTE]
-> This version includes a runnable interpreter and RackUnit test coverage.
-
-## Features
-**Implemented:**
-- Integer, string, and boolean values
-- Variables through environment/store bindings
-- Mutation with `:=`
-- `if`, `fn`, `given`, and function calls
-- Primitive operations including arithmetic, comparison, equality, strings, input/output, sequencing, and concatenation
-- Array creation, indexing, and mutation with `make-array`, `array`, `aref`, and `aset!`
-- Higher-order examples for `while` and `in-order`
+## Implemented Features
+- Numbers, booleans, strings, and `null`
+- Variables and assignment
+- Blocks, `if`, and `while`
+- First-class functions and function calls
+- Arithmetic, comparison, equality, and boolean operators
+- Address-of, dereference, and pointer assignment
+- `malloc` and `free`-style memory operations
+- Arrays with creation, indexing, and mutation
+- Structs with field lookup and field mutation
 - RackUnit tests in `Assignment8.rkt`
 
+## Example
+```racket
+(top-interp
+ '(var x 7
+    (var p (& x)
+      (block
+        (ptr-set! p 99)
+        (deref p)))))
+```
+
+This evaluates to `"99"`.
