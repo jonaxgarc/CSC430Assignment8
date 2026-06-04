@@ -3,6 +3,9 @@
 ## Overview
 This is the implementation of the C Language in the Racket language using the concepts learned in CSC 430.
 
+> [!NOTE]
+> This has not been fully implemented yet.
+
 ## Features
 **Implemented:**
 - Integer Expressions
