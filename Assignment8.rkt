@@ -1,492 +1,324 @@
 #lang typed/racket
 (require typed/rackunit)
 
-;; Assignment 8: a small C-like language implemented in Typed Racket.
-;; The language uses s-expressions as its source syntax so it is easy to parse
-;; in Racket, but the features are C-inspired: variables, assignment, blocks,
-;; while loops, functions, arrays, structs, pointers, malloc, and free.
+;; Full core project implemented.
+;; This is a small C-inspired language in Typed Racket. It follows the
+;; Assignment 4 interpreter shape, but uses local var bindings to feel C-like.
 
-(define-type Location Natural)
-(define-type Env (Listof Binding))
-(define-type FieldExprs (Listof FieldExpr))
-(define-type Fields (Listof FieldLoc))
-(define-type ExprC
-  (U NumC BoolC StringC IdC IfC WhileC BlockC VarC SetC FnC CallC BinopC
-     AddrC DerefC PtrSetC ArrayC ArefC AsetC StructC FieldC FieldSetC
-     MallocC FreeC))
-(define-type Value (U NumV BoolV StringV CloV PtrV ArrayV StructV NullV))
-
+(define-type ExprC (U NumC IdC StringC IfC FnC CallC))
 (struct NumC ([n : Real]) #:transparent)
-(struct BoolC ([b : Boolean]) #:transparent)
-(struct StringC ([s : String]) #:transparent)
 (struct IdC ([name : Symbol]) #:transparent)
+(struct StringC ([str : String]) #:transparent)
 (struct IfC ([test : ExprC] [then : ExprC] [else : ExprC]) #:transparent)
-(struct WhileC ([test : ExprC] [body : ExprC]) #:transparent)
-(struct BlockC ([exprs : (Listof ExprC)]) #:transparent)
-(struct VarC ([name : Symbol] [init : ExprC] [body : ExprC]) #:transparent)
-(struct SetC ([name : Symbol] [rhs : ExprC]) #:transparent)
 (struct FnC ([params : (Listof Symbol)] [body : ExprC]) #:transparent)
 (struct CallC ([fun : ExprC] [args : (Listof ExprC)]) #:transparent)
-(struct BinopC ([op : Symbol] [left : ExprC] [right : ExprC]) #:transparent)
-(struct AddrC ([name : Symbol]) #:transparent)
-(struct DerefC ([ptr : ExprC]) #:transparent)
-(struct PtrSetC ([ptr : ExprC] [rhs : ExprC]) #:transparent)
-(struct ArrayC ([items : (Listof ExprC)]) #:transparent)
-(struct ArefC ([arr : ExprC] [index : ExprC]) #:transparent)
-(struct AsetC ([arr : ExprC] [index : ExprC] [rhs : ExprC]) #:transparent)
-(struct StructC ([fields : FieldExprs]) #:transparent)
-(struct FieldC ([target : ExprC] [name : Symbol]) #:transparent)
-(struct FieldSetC ([target : ExprC] [name : Symbol] [rhs : ExprC]) #:transparent)
-(struct MallocC ([init : ExprC]) #:transparent)
-(struct FreeC ([ptr : ExprC]) #:transparent)
 
-(struct FieldExpr ([name : Symbol] [expr : ExprC]) #:transparent)
-(struct FieldLoc ([name : Symbol] [loc : Location]) #:transparent)
-(struct Binding ([name : Symbol] [loc : Location]) #:transparent)
-(struct Store ([next : Location] [cells : (HashTable Location Value)]) #:transparent)
-(struct Result ([value : Value] [store : Store]) #:transparent)
-(struct AllocResult ([loc : Location] [store : Store]) #:transparent)
-
+(define-type Value (U NumV BoolV StringV CloV PrimV))
 (struct NumV ([n : Real]) #:transparent)
 (struct BoolV ([b : Boolean]) #:transparent)
-(struct StringV ([s : String]) #:transparent)
-(struct CloV ([params : (Listof Symbol)] [body : ExprC] [env : Env]) #:transparent)
-(struct PtrV ([loc : Location]) #:transparent)
-(struct ArrayV ([base : Location] [size : Natural]) #:transparent)
-(struct StructV ([fields : Fields]) #:transparent)
-(struct NullV () #:transparent)
+(struct StringV ([str : String]) #:transparent)
+(struct CloV ([params : (Listof Symbol)]
+              [body : ExprC]
+              [env : Env]) #:transparent)
+(struct PrimV ([op : Symbol]) #:transparent)
 
-(: empty-env Env)
-(define empty-env empty)
+(struct Binding ([name : Symbol] [val : Value]) #:transparent)
+(define-type Env (Listof Binding))
 
-(: empty-store Store)
-(define empty-store (Store 0 (hash)))
+(: top-env Env)
+(define top-env
+  (list (Binding '+ (PrimV '+))
+        (Binding '- (PrimV '-))
+        (Binding '* (PrimV '*))
+        (Binding '/ (PrimV '/))
+        (Binding '<= (PrimV '<=))
+        (Binding 'equal? (PrimV 'equal?))
+        (Binding 'substring (PrimV 'substring))
+        (Binding 'strlen (PrimV 'strlen))
+        (Binding 'error (PrimV 'error))
+        (Binding 'true (BoolV #t))
+        (Binding 'false (BoolV #f))))
 
 ;;;; reserved? function
-; Purpose: rejects keywords when parsing names that should be normal variables.
+; Purpose: returns true when a symbol is reserved syntax instead of a variable name.
 (: reserved? (Symbol -> Boolean))
 (define (reserved? sym)
   (or (symbol=? sym 'if)
-      (symbol=? sym 'while)
-      (symbol=? sym 'block)
+      (symbol=? sym '=)
       (symbol=? sym 'var)
-      (symbol=? sym 'set!)
       (symbol=? sym 'fn)
-      (symbol=? sym '&)
-      (symbol=? sym 'deref)
-      (symbol=? sym 'ptr-set!)
-      (symbol=? sym 'array)
-      (symbol=? sym 'aref)
-      (symbol=? sym 'aset!)
-      (symbol=? sym 'struct)
-      (symbol=? sym 'field)
-      (symbol=? sym 'field-set!)
-      (symbol=? sym 'malloc)
-      (symbol=? sym 'free)
-      (symbol=? sym 'null)))
+      (symbol=? sym '->)
+      (symbol=? sym 'do)))
 
-;;;; parse-field function
-; Purpose: parses one struct field, written like [field-name value].
-(: parse-field (Sexp -> FieldExpr))
-(define (parse-field s)
-  (match s
-    [(list (? symbol? name) val)
+;;;; has-duplicates? function
+; Purpose: returns true when a list of parameter or binding names repeats a name.
+(: has-duplicates? ((Listof Symbol) -> Boolean))
+(define (has-duplicates? names)
+  (match names
+    ['() #f]
+    [(cons first-name rest-names)
+     (or (not (false? (member first-name rest-names)))
+         (has-duplicates? rest-names))]))
+
+;;;; parse-binding-name function
+; Purpose: extracts the variable name from one var binding.
+(: parse-binding-name (Sexp -> Symbol))
+(define (parse-binding-name binding)
+  (match binding
+    [(list (? symbol? name) '= rhs)
      (if (reserved? name)
-         (error 'parse "CLANG: invalid struct field name: ~e" name)
-         (FieldExpr name (parse val)))]
-    [_ (error 'parse "CLANG: invalid struct field: ~e" s)]))
+         (error 'parse "C430: invalid var binding name: ~e" binding)
+         name)]
+    [_ (error 'parse "C430: invalid var binding: ~e" binding)]))
+
+;;;; parse-binding-val function
+; Purpose: parses the value expression from one var binding.
+(: parse-binding-val (Sexp -> ExprC))
+(define (parse-binding-val binding)
+  (match binding
+    [(list (? symbol? name) '= rhs) (parse rhs)]
+    [_ (error 'parse "C430: invalid var binding: ~e" binding)]))
 
 ;;;; parse function
-; Purpose: turns C-like s-expression source code into the interpreter AST.
+; Purpose: parses one C-inspired source expression into an ExprC AST node.
 (: parse (Sexp -> ExprC))
 (define (parse s)
   (match s
     [(? real? n) (NumC n)]
     [(? string? str) (StringC str)]
-    ['true (BoolC #t)]
-    ['false (BoolC #f)]
-    ['null (BlockC empty)]
     [(? symbol? sym)
      (if (reserved? sym)
-         (error 'parse "CLANG: invalid identifier: ~e" sym)
+         (error 'parse "C430: invalid identifier: ~e" s)
          (IdC sym))]
-    [(list 'if test then else) (IfC (parse test) (parse then) (parse else))]
-    [(list 'while test body) (WhileC (parse test) (parse body))]
-    [(list 'block exprs ...) (BlockC (map parse exprs))]
-    [(list 'var (? symbol? name) init body)
-     (if (reserved? name)
-         (error 'parse "CLANG: invalid variable name: ~e" name)
-         (VarC name (parse init) (parse body)))]
-    [(list 'set! (? symbol? name) rhs) (SetC name (parse rhs))]
-    [(list 'fn (list (? symbol? params) ...) body)
-     (FnC (cast params (Listof Symbol)) (parse body))]
-    [(list (? symbol? op) left right)
-     #:when (member op '(+ - * / < <= > >= == != && ||))
-     (BinopC op (parse left) (parse right))]
-    [(list '& (? symbol? name)) (AddrC name)]
-    [(list 'deref ptr) (DerefC (parse ptr))]
-    [(list 'ptr-set! ptr rhs) (PtrSetC (parse ptr) (parse rhs))]
-    [(list 'array items ...) (ArrayC (map parse items))]
-    [(list 'aref arr index) (ArefC (parse arr) (parse index))]
-    [(list 'aset! arr index rhs) (AsetC (parse arr) (parse index) (parse rhs))]
-    [(list 'struct (list fields ...)) (StructC (map parse-field fields))]
-    [(list 'field target (? symbol? name)) (FieldC (parse target) name)]
-    [(list 'field-set! target (? symbol? name) rhs) (FieldSetC (parse target) name (parse rhs))]
-    [(list 'malloc init) (MallocC (parse init))]
-    [(list 'free ptr) (FreeC (parse ptr))]
-    [(list fun args ...) (CallC (parse fun) (map parse args))]
-    [_ (error 'parse "CLANG: invalid expression: ~e" s)]))
+    [(list 'if test then else)
+     (IfC (parse test) (parse then) (parse else))]
+    [(list 'fn (list (? symbol? params) ...) '-> body)
+     (define param-list (cast params (Listof Symbol)))
+     (cond
+       [(ormap reserved? param-list)
+        (error 'parse "C430: invalid function parameter: ~e" s)]
+       [(has-duplicates? param-list)
+        (error 'parse "C430: duplicate function parameter: ~e" s)]
+       [else (FnC param-list (parse body))])]
+    [(list 'var (list bindings ...) 'do body)
+     (define names (map parse-binding-name bindings))
+     (define vals (map parse-binding-val bindings))
+     (if (has-duplicates? names)
+         (error 'parse "C430: duplicate var binding: ~e" s)
+         (CallC (FnC names (parse body)) vals))]
+    [(list fun args ...)
+     (CallC (parse fun) (map parse args))]
+    [_ (error 'parse "C430: invalid expression: ~e" s)]))
 
 ;;;; lookup function
-; Purpose: finds the memory location for a variable in the environment.
-(: lookup (Symbol Env -> Location))
+; Purpose: returns the value bound to a name in the current environment.
+(: lookup (Symbol Env -> Value))
 (define (lookup name env)
   (match env
-    ['() (error 'lookup "CLANG: unbound variable: ~e" name)]
-    [(cons (Binding bind-name bind-loc) rest-env)
+    ['() (error 'lookup "C430: unbound identifier: ~e" name)]
+    [(cons (Binding bind-name bind-val) rest-env)
      (if (symbol=? name bind-name)
-         bind-loc
+         bind-val
          (lookup name rest-env))]))
 
 ;;;; extend function
-; Purpose: adds one variable binding to an environment.
-(: extend (Env Symbol Location -> Env))
-(define (extend env name loc)
-  (cons (Binding name loc) env))
+; Purpose: extends an environment with one new name/value binding.
+(: extend (Env Symbol Value -> Env))
+(define (extend env name val)
+  (cons (Binding name val) env))
 
-;;;; allocate function
-; Purpose: reserves one fresh memory cell in the store.
-(: allocate (Store Value -> AllocResult))
-(define (allocate sto val)
-  (define loc (Store-next sto))
-  (AllocResult loc (Store (add1 loc) (hash-set (Store-cells sto) loc val))))
-
-;;;; allocate-many function
-; Purpose: reserves several adjacent cells, used for C-like arrays.
-(: allocate-many (Store (Listof Value) -> (Pairof ArrayV Store)))
-(define (allocate-many sto vals)
-  (define base (Store-next sto))
-  (let loop ([items : (Listof Value) vals]
-             [next-loc : Location base]
-             [cells : (HashTable Location Value) (Store-cells sto)])
-    (match items
-      ['() (cons (ArrayV base (length vals)) (Store next-loc cells))]
-      [(cons first-val rest-vals)
-       (loop rest-vals (add1 next-loc) (hash-set cells next-loc first-val))])))
-
-;;;; store-ref* function
-; Purpose: reads a value from memory.
-(: store-ref* (Store Location -> Value))
-(define (store-ref* sto loc)
-  (hash-ref (Store-cells sto) loc
-            (lambda () (error 'interp "CLANG: invalid memory location: ~e" loc))))
-
-;;;; store-set* function
-; Purpose: writes a value into an existing memory cell.
-(: store-set* (Store Location Value -> Store))
-(define (store-set* sto loc val)
-  (if (hash-has-key? (Store-cells sto) loc)
-      (Store (Store-next sto) (hash-set (Store-cells sto) loc val))
-      (error 'interp "CLANG: invalid memory location: ~e" loc)))
-
-;;;; store-free function
-; Purpose: removes a memory cell to model C's free operation.
-(: store-free (Store Location -> Store))
-(define (store-free sto loc)
-  (if (hash-has-key? (Store-cells sto) loc)
-      (Store (Store-next sto) (hash-remove (Store-cells sto) loc))
-      (error 'interp "CLANG: cannot free invalid pointer: ~e" loc)))
-
-;;;; truthy? function
-; Purpose: converts values into C-like boolean behavior.
-(: truthy? (Value -> Boolean))
-(define (truthy? val)
-  (match val
-    [(BoolV b) b]
-    [(NumV n) (not (zero? n))]
-    [(NullV) #f]
-    [_ #t]))
+;;;; extend-many function
+; Purpose: extends an environment with all function parameters and argument values.
+(: extend-many (Env (Listof Symbol) (Listof Value) -> Env))
+(define (extend-many env params vals)
+  (match* (params vals)
+    [('() '()) env]
+    [((cons first-param rest-params) (cons first-val rest-vals))
+     (extend-many (extend env first-param first-val) rest-params rest-vals)]
+    [(_ _) (error 'interp "C430: function arity mismatch")]))
 
 ;;;; serialize function
-; Purpose: turns an interpreted value into a printable string.
+; Purpose: converts any interpreted C430 value into its printed string form.
 (: serialize (Value -> String))
 (define (serialize val)
   (match val
     [(NumV n) (~v n)]
     [(BoolV #t) "true"]
     [(BoolV #f) "false"]
-    [(StringV s) (~v s)]
-    [(CloV params body env) "#<function>"]
-    [(PtrV loc) (format "#<ptr:~a>" loc)]
-    [(ArrayV base size) "#<array>"]
-    [(StructV fields) "#<struct>"]
-    [(NullV) "null"]))
+    [(StringV str) (~v str)]
+    [(CloV params body env) "#<procedure>"]
+    [(PrimV op) "#<primop>"]))
 
-;;;; expect-num function
-; Purpose: checks that a value is numeric before arithmetic.
-(: expect-num (Value -> Real))
-(define (expect-num val)
+;;;; numV-n* function
+; Purpose: extracts a real number from a value or reports a numeric type error.
+(: numV-n* (Value -> Real))
+(define (numV-n* val)
   (match val
     [(NumV n) n]
-    [_ (error 'interp "CLANG: expected number, got ~a" (serialize val))]))
+    [_ (error 'interp "C430: expected number, got ~a" (serialize val))]))
 
-;;;; expect-ptr function
-; Purpose: checks that a value is a pointer before pointer operations.
-(: expect-ptr (Value -> Location))
-(define (expect-ptr val)
+;;;; stringV-str* function
+; Purpose: extracts a string from a value or reports a string type error.
+(: stringV-str* (Value -> String))
+(define (stringV-str* val)
   (match val
-    [(PtrV loc) loc]
-    [_ (error 'interp "CLANG: expected pointer, got ~a" (serialize val))]))
+    [(StringV str) str]
+    [_ (error 'interp "C430: expected string, got ~a" (serialize val))]))
 
-;;;; expect-array function
-; Purpose: checks that a value is an array before array operations.
-(: expect-array (Value -> ArrayV))
-(define (expect-array val)
-  (match val
-    [(ArrayV base size) val]
-    [_ (error 'interp "CLANG: expected array, got ~a" (serialize val))]))
-
-;;;; expect-struct function
-; Purpose: checks that a value is a struct before field operations.
-(: expect-struct (Value -> StructV))
-(define (expect-struct val)
-  (match val
-    [(StructV fields) val]
-    [_ (error 'interp "CLANG: expected struct, got ~a" (serialize val))]))
-
-;;;; valid-index function
-; Purpose: validates and converts array indexes.
-(: valid-index (Value Natural -> Natural))
-(define (valid-index val size)
-  (define n (expect-num val))
-  (if (and (integer? n) (<= 0 n) (< n size))
-      (cast n Natural)
-      (error 'interp "CLANG: invalid array index: ~e" n)))
-
-;;;; field-location function
-; Purpose: finds the memory location for a field inside a struct.
-(: field-location (Fields Symbol -> Location))
-(define (field-location fields name)
-  (match fields
-    ['() (error 'interp "CLANG: unknown struct field: ~e" name)]
-    [(cons (FieldLoc field-name loc) rest-fields)
-     (if (symbol=? name field-name)
-         loc
-         (field-location rest-fields name))]))
+;;;; check-args function
+; Purpose: verifies that a primitive received exactly the expected number of arguments.
+(: check-args ((Listof Value) Natural Symbol -> Void))
+(define (check-args args expected op)
+  (unless (= (length args) expected)
+    (error 'interp "C430: wrong number of arguments for ~e" op)))
 
 ;;;; value-equal? function
-; Purpose: compares simple C-like values for == and !=.
+; Purpose: compares non-function values for the equal? primitive.
 (: value-equal? (Value Value -> Boolean))
 (define (value-equal? left right)
   (match* (left right)
     [((NumV a) (NumV b)) (= a b)]
     [((BoolV a) (BoolV b)) (equal? a b)]
-    [((StringV a) (StringV b)) (string=? a b)]
-    [((PtrV a) (PtrV b)) (= a b)]
-    [((ArrayV a-base a-size) (ArrayV b-base b-size))
-     (and (= a-base b-base) (= a-size b-size))]
-    [((NullV) (NullV)) #t]
+    [((StringV a) (StringV b)) (equal? a b)]
     [(_ _) #f]))
 
-;;;; interp-binop function
-; Purpose: evaluates C-like binary operators.
-(: interp-binop (Symbol Value Value -> Value))
-(define (interp-binop op left right)
+;;;; valid-substring-index function
+; Purpose: converts a real number into a safe string index.
+(: valid-substring-index (Real Exact-Nonnegative-Integer Symbol -> Exact-Nonnegative-Integer))
+(define (valid-substring-index n strlen op)
+  (if (and (integer? n) (<= 0 n) (<= n strlen))
+      (cast n Exact-Nonnegative-Integer)
+      (error 'interp "C430: invalid substring index for ~e: ~e" op n)))
+
+;;;; apply-primitive function
+; Purpose: applies a built-in C430 primitive operator to already-interpreted values.
+(: apply-primitive (Symbol (Listof Value) -> Value))
+(define (apply-primitive op args)
   (match op
-    ['+ (NumV (+ (expect-num left) (expect-num right)))]
-    ['- (NumV (- (expect-num left) (expect-num right)))]
-    ['* (NumV (* (expect-num left) (expect-num right)))]
-    ['/ (if (zero? (expect-num right))
-            (error 'interp "CLANG: division by zero")
-            (NumV (/ (expect-num left) (expect-num right))))]
-    ['< (BoolV (< (expect-num left) (expect-num right)))]
-    ['<= (BoolV (<= (expect-num left) (expect-num right)))]
-    ['> (BoolV (> (expect-num left) (expect-num right)))]
-    ['>= (BoolV (>= (expect-num left) (expect-num right)))]
-    ['== (BoolV (value-equal? left right))]
-    ['!= (BoolV (not (value-equal? left right)))]
-    ['&& (BoolV (and (truthy? left) (truthy? right)))]
-    ['|| (BoolV (or (truthy? left) (truthy? right)))]
-    [_ (error 'interp "CLANG: unknown binary operator: ~e" op)]))
+    ['+
+     (check-args args 2 op)
+     (NumV (+ (numV-n* (first args)) (numV-n* (second args))))]
+    ['-
+     (check-args args 2 op)
+     (NumV (- (numV-n* (first args)) (numV-n* (second args))))]
+    ['*
+     (check-args args 2 op)
+     (NumV (* (numV-n* (first args)) (numV-n* (second args))))]
+    ['/
+     (check-args args 2 op)
+     (if (zero? (numV-n* (second args)))
+         (error 'interp "C430: division by zero in /")
+         (NumV (/ (numV-n* (first args)) (numV-n* (second args)))))]
+    ['<=
+     (check-args args 2 op)
+     (BoolV (<= (numV-n* (first args)) (numV-n* (second args))))]
+    ['equal?
+     (check-args args 2 op)
+     (BoolV (value-equal? (first args) (second args)))]
+    ['substring
+     (check-args args 3 op)
+     (define str (stringV-str* (first args)))
+     (define start (valid-substring-index (numV-n* (second args))
+                                          (string-length str)
+                                          op))
+     (define stop (valid-substring-index (numV-n* (third args))
+                                         (string-length str)
+                                         op))
+     (if (<= start stop)
+         (StringV (substring str start stop))
+         (error 'interp "C430: substring stop before start: ~e" args))]
+    ['strlen
+     (check-args args 1 op)
+     (NumV (string-length (stringV-str* (first args))))]
+    ['error
+     (check-args args 1 op)
+     (error 'interp "C430: user-error: ~a" (serialize (first args)))]
+    [_ (error 'interp "C430: unknown primitive: ~e" op)]))
 
-;;;; interp-list function
-; Purpose: evaluates a list of expressions and returns their values.
-(: interp-list ((Listof ExprC) Env Store -> (Pairof (Listof Value) Store)))
-(define (interp-list exprs env sto)
-  (match exprs
-    ['() (cons empty sto)]
-    [(cons first-expr rest-exprs)
-     (define first-result (interp first-expr env sto))
-     (define rest-result (interp-list rest-exprs env (Result-store first-result)))
-     (cons (cons (Result-value first-result) (car rest-result))
-           (cdr rest-result))]))
-
-;;;; interp-block function
-; Purpose: evaluates expressions in order and returns the final value.
-(: interp-block ((Listof ExprC) Env Store -> Result))
-(define (interp-block exprs env sto)
-  (match exprs
-    ['() (Result (NullV) sto)]
-    [(list last-expr) (interp last-expr env sto)]
-    [(cons first-expr rest-exprs)
-     (define first-result (interp first-expr env sto))
-     (interp-block rest-exprs env (Result-store first-result))]))
-
-;;;; bind-params function
-; Purpose: binds function parameters to fresh memory locations.
-(: bind-params ((Listof Symbol) (Listof Value) Env Store -> (Pairof Env Store)))
-(define (bind-params params vals env sto)
-  (match* (params vals)
-    [('() '()) (cons env sto)]
-    [((cons first-param rest-params) (cons first-val rest-vals))
-     (define alloc-result (allocate sto first-val))
-     (bind-params rest-params
-                  rest-vals
-                  (extend env first-param (AllocResult-loc alloc-result))
-                  (AllocResult-store alloc-result))]
-    [(_ _) (error 'interp "CLANG: function arity mismatch")]))
-
-;;;; build-fields function
-; Purpose: evaluates struct fields and stores each field in memory.
-(: build-fields (FieldExprs Env Store Fields -> (Pairof Fields Store)))
-(define (build-fields fields env sto built)
-  (match fields
-    ['() (cons (reverse built) sto)]
-    [(cons (FieldExpr name expr) rest-fields)
-     (define expr-result (interp expr env sto))
-     (define alloc-result (allocate (Result-store expr-result) (Result-value expr-result)))
-     (build-fields rest-fields
-                   env
-                   (AllocResult-store alloc-result)
-                   (cons (FieldLoc name (AllocResult-loc alloc-result)) built))]))
+;;;; interp-args function
+; Purpose: interprets each function argument from left to right.
+(: interp-args ((Listof ExprC) Env -> (Listof Value)))
+(define (interp-args args env)
+  (match args
+    ['() empty]
+    [(cons first-arg rest-args)
+     (cons (interp first-arg env)
+           (interp-args rest-args env))]))
 
 ;;;; interp function
-; Purpose: evaluates one C-like AST node using an environment and store.
-(: interp (ExprC Env Store -> Result))
-(define (interp expr env sto)
-  (match expr
-    [(NumC n) (Result (NumV n) sto)]
-    [(BoolC b) (Result (BoolV b) sto)]
-    [(StringC s) (Result (StringV s) sto)]
-    [(IdC name) (Result (store-ref* sto (lookup name env)) sto)]
+; Purpose: interprets one AST node in the supplied environment.
+(: interp (ExprC Env -> Value))
+(define (interp exp env)
+  (match exp
+    [(NumC n) (NumV n)]
+    [(StringC str) (StringV str)]
+    [(IdC name) (lookup name env)]
     [(IfC test then else)
-     (define test-result (interp test env sto))
-     (if (truthy? (Result-value test-result))
-         (interp then env (Result-store test-result))
-         (interp else env (Result-store test-result)))]
-    [(WhileC test body)
-     (let loop ([current-store : Store sto])
-       (define test-result (interp test env current-store))
-       (if (truthy? (Result-value test-result))
-           (let ([body-result (interp body env (Result-store test-result))])
-             (loop (Result-store body-result)))
-           (Result (NullV) (Result-store test-result))))]
-    [(BlockC exprs) (interp-block exprs env sto)]
-    [(VarC name init body)
-     (define init-result (interp init env sto))
-     (define alloc-result (allocate (Result-store init-result) (Result-value init-result)))
-     (interp body
-             (extend env name (AllocResult-loc alloc-result))
-             (AllocResult-store alloc-result))]
-    [(SetC name rhs)
-     (define rhs-result (interp rhs env sto))
-     (define loc (lookup name env))
-     (Result (Result-value rhs-result)
-             (store-set* (Result-store rhs-result) loc (Result-value rhs-result)))]
-    [(FnC params body) (Result (CloV params body env) sto)]
+     (match (interp test env)
+       [(BoolV #t) (interp then env)]
+       [(BoolV #f) (interp else env)]
+       [_ (error 'interp "C430: if test must be boolean in ~e" exp)])]
+    [(FnC params body) (CloV params body env)]
     [(CallC fun args)
-     (define fun-result (interp fun env sto))
-     (define arg-result (interp-list args env (Result-store fun-result)))
-     (match (Result-value fun-result)
+     (define fun-val (interp fun env))
+     (define arg-vals (interp-args args env))
+     (match fun-val
+       [(PrimV op) (apply-primitive op arg-vals)]
        [(CloV params body saved-env)
-        (define bindings (bind-params params (car arg-result) saved-env (cdr arg-result)))
-        (interp body (car bindings) (cdr bindings))]
-       [_ (error 'interp "CLANG: attempted to call a non-function")])]
-    [(BinopC op left right)
-     (define left-result (interp left env sto))
-     (define right-result (interp right env (Result-store left-result)))
-     (Result (interp-binop op (Result-value left-result) (Result-value right-result))
-             (Result-store right-result))]
-    [(AddrC name) (Result (PtrV (lookup name env)) sto)]
-    [(DerefC ptr)
-     (define ptr-result (interp ptr env sto))
-     (Result (store-ref* (Result-store ptr-result)
-                         (expect-ptr (Result-value ptr-result)))
-             (Result-store ptr-result))]
-    [(PtrSetC ptr rhs)
-     (define ptr-result (interp ptr env sto))
-     (define rhs-result (interp rhs env (Result-store ptr-result)))
-     (define loc (expect-ptr (Result-value ptr-result)))
-     (Result (Result-value rhs-result)
-             (store-set* (Result-store rhs-result) loc (Result-value rhs-result)))]
-    [(ArrayC items)
-     (define item-result (interp-list items env sto))
-     (define arr-result (allocate-many (cdr item-result) (car item-result)))
-     (Result (car arr-result) (cdr arr-result))]
-    [(ArefC arr index)
-     (define arr-result (interp arr env sto))
-     (define index-result (interp index env (Result-store arr-result)))
-     (match (expect-array (Result-value arr-result))
-       [(ArrayV base size)
-        (define index-loc (valid-index (Result-value index-result) size))
-        (Result (store-ref* (Result-store index-result) (+ base index-loc))
-                (Result-store index-result))])]
-    [(AsetC arr index rhs)
-     (define arr-result (interp arr env sto))
-     (define index-result (interp index env (Result-store arr-result)))
-     (define rhs-result (interp rhs env (Result-store index-result)))
-     (match (expect-array (Result-value arr-result))
-       [(ArrayV base size)
-        (define index-loc (valid-index (Result-value index-result) size))
-        (Result (Result-value rhs-result)
-                (store-set* (Result-store rhs-result) (+ base index-loc) (Result-value rhs-result)))])]
-    [(StructC fields)
-     (define built (build-fields fields env sto empty))
-     (Result (StructV (car built)) (cdr built))]
-    [(FieldC target name)
-     (define target-result (interp target env sto))
-     (match (expect-struct (Result-value target-result))
-       [(StructV fields)
-        (Result (store-ref* (Result-store target-result) (field-location fields name))
-                (Result-store target-result))])]
-    [(FieldSetC target name rhs)
-     (define target-result (interp target env sto))
-     (define rhs-result (interp rhs env (Result-store target-result)))
-     (match (expect-struct (Result-value target-result))
-       [(StructV fields)
-        (define loc (field-location fields name))
-        (Result (Result-value rhs-result)
-                (store-set* (Result-store rhs-result) loc (Result-value rhs-result)))])]
-    [(MallocC init)
-     (define init-result (interp init env sto))
-     (define alloc-result (allocate (Result-store init-result) (Result-value init-result)))
-     (Result (PtrV (AllocResult-loc alloc-result)) (AllocResult-store alloc-result))]
-    [(FreeC ptr)
-     (define ptr-result (interp ptr env sto))
-     (Result (NullV)
-             (store-free (Result-store ptr-result)
-                         (expect-ptr (Result-value ptr-result))))]))
+        (if (= (length params) (length arg-vals))
+            (interp body (extend-many saved-env params arg-vals))
+            (error 'interp "C430: function arity mismatch in ~e" exp))]
+       [_ (error 'interp "C430: attempted to call non-function in ~e" exp)])]))
 
 ;;;; top-interp function
-; Purpose: parses, interprets, and serializes one C-like program.
+; Purpose: parses, interprets, and serializes one complete C430 program.
 (: top-interp (Sexp -> String))
 (define (top-interp s)
-  (serialize (Result-value (interp (parse s) empty-env empty-store))))
+  (serialize (interp (parse s) top-env)))
 
 (module+ test
-  ;;;; TEST CASES
-  (check-equal? (top-interp '(+ 20 22)) "42")
-  (check-equal? (top-interp '(var x 5 (+ x 3))) "8")
-  (check-equal? (top-interp '(var x 0 (block (set! x 9) x))) "9")
-  (check-equal? (top-interp '(if (== 1 1) 10 20)) "10")
-  (check-equal? (top-interp '(var i 0 (block (while (< i 3) (set! i (+ i 1))) i))) "3")
-  (check-equal? (top-interp '((fn (x) (* x x)) 6)) "36")
-  (check-equal? (top-interp '(var x 7 (var p (& x) (block (ptr-set! p 99) (deref p))))) "99")
-  (check-equal? (top-interp '(var p (malloc 12) (block (ptr-set! p 13) (deref p)))) "13")
-  (check-equal? (top-interp '(var a (array 1 2 3) (block (aset! a 1 50) (aref a 1)))) "50")
-  (check-equal? (top-interp '(var point (struct ([x 2] [y 3]))
-                                (block (field-set! point x 8) (field point x))))
-                "8")
-  (check-equal? (top-interp '(var p (malloc 4) (block (free p) null))) "null")
-  (check-exn #rx"CLANG" (lambda () (top-interp '(+ 1 "bad"))))
-  (check-exn #rx"CLANG" (lambda () (top-interp '(aref (array 1 2) 5)))))
+  (check-equal? (parse '5) (NumC 5))
+  (check-equal? (parse '"hello") (StringC "hello"))
+  (check-equal? (parse 'x) (IdC 'x))
+  (check-equal? (parse '(if true 1 2))
+                (IfC (IdC 'true) (NumC 1) (NumC 2)))
+  (check-equal? (parse '(+ 1 2))
+                (CallC (IdC '+) (list (NumC 1) (NumC 2))))
+  (check-equal? (parse '(var ([x = 1] [y = 2]) do (+ x y)))
+                (CallC (FnC (list 'x 'y)
+                            (CallC (IdC '+) (list (IdC 'x) (IdC 'y))))
+                       (list (NumC 1) (NumC 2))))
+  (check-exn #rx"C430" (lambda () (parse #t)))
+  (check-exn #rx"C430" (lambda () (parse '(if true 1))))
+  (check-exn #rx"C430" (lambda () (parse '(fn (x x) -> x))))
+  (check-exn #rx"C430" (lambda () (parse '(var ([x = 1] [x = 2]) do x))))
+
+  (check-equal? (lookup 'x (list (Binding 'x (NumV 9)))) (NumV 9))
+  (check-exn #rx"C430" (lambda () (lookup 'missing top-env)))
+
+  (check-equal? (serialize (NumV 34)) "34")
+  (check-equal? (serialize (BoolV #t)) "true")
+  (check-equal? (serialize (BoolV #f)) "false")
+  (check-equal? (serialize (StringV "hi")) "\"hi\"")
+  (check-equal? (serialize (PrimV '+)) "#<primop>")
+  (check-equal? (serialize (CloV (list 'x) (IdC 'x) top-env)) "#<procedure>")
+
+  (check-equal? (top-interp '(+ 1 2)) "3")
+  (check-equal? (top-interp '(- 5 2)) "3")
+  (check-equal? (top-interp '(* 3 4)) "12")
+  (check-equal? (top-interp '(/ 8 2)) "4")
+  (check-equal? (top-interp '(<= 1 2)) "true")
+  (check-equal? (top-interp '(equal? "a" "a")) "true")
+  (check-equal? (top-interp '(if true 10 20)) "10")
+  (check-equal? (top-interp '(if false 10 20)) "20")
+  (check-equal? (top-interp '((fn (x) -> (+ x 1)) 5)) "6")
+  (check-equal? (top-interp '(((fn (x) -> (fn (y) -> (+ x y))) 10) 5)) "15")
+  (check-equal? (top-interp '(var ([x = 3] [y = 4]) do (+ x y))) "7")
+  (check-equal? (top-interp '(strlen "hello")) "5")
+  (check-equal? (top-interp '(substring "hello" 1 4)) "\"ell\"")
+
+  (check-exn #rx"C430" (lambda () (top-interp '(+ 1 "bad"))))
+  (check-exn #rx"C430" (lambda () (top-interp '(/ 1 0))))
+  (check-exn #rx"C430" (lambda () (top-interp '(if 1 2 3))))
+  (check-exn #rx"C430" (lambda () (top-interp '(1 2))))
+  (check-exn #rx"C430: user-error" (lambda () (top-interp '(error "bad")))))

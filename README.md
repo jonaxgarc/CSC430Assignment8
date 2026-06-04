@@ -1,28 +1,24 @@
-# Assignment 8 - C-like Language in Typed Racket
+# Assignment 8 - C430 Core Interpreter
 
 ## Overview
-This project implements a small C-like language using Typed Racket. The source language uses Racket s-expressions so parsing stays manageable, but the supported features are based on core C ideas.
+This project implements a small C-inspired interpreter in Typed Racket. It follows the same core structure as the higher-order interpreter assignment: parse source syntax into an AST, interpret with an environment, serialize values, and test the behavior with RackUnit.
 
-## Implemented Features
-- Numbers, booleans, strings, and `null`
-- Variables and assignment
-- Blocks, `if`, and `while`
-- First-class functions and function calls
-- Arithmetic, comparison, equality, and boolean operators
-- Address-of, dereference, and pointer assignment
-- `malloc` and `free`-style memory operations
-- Arrays with creation, indexing, and mutation
-- Structs with field lookup and field mutation
-- RackUnit tests in `Assignment8.rkt`
+## Implemented
+- Numbers, booleans, and strings
+- Variables through local `var` bindings
+- `if` expressions
+- Higher-order functions and closures
+- Function calls where primitives are values
+- Primitive operators: `+`, `-`, `*`, `/`, `<=`, `equal?`, `substring`, `strlen`, and `error`
+- Helpful error messages containing `C430`
+- RackUnit tests for parsing, serialization, lookup, primitives, functions, and errors
 
 ## Example
 ```racket
 (top-interp
- '(var x 7
-    (var p (& x)
-      (block
-        (ptr-set! p 99)
-        (deref p)))))
+ '(var ([x = 3] [y = 4])
+    do
+    (+ x y)))
 ```
 
-This evaluates to `"99"`.
+This evaluates to `"7"`.
