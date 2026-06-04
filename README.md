@@ -1,20 +1,19 @@
 # Assignment 8 - Recreating the C Language in Racket
 
 ## Overview
-This is the implementation of the C Language in the Racket language using the concepts learned in CSC 430.
+This project recreates the Assignment 4 interpreter style in Typed Racket. It implements a small VEBG-style language with parsing, interpretation, mutation, primitive operations, and array-backed memory.
 
 > [!NOTE]
-> The implementation is intentionally small, but it now includes a runnable interpreter with tests.
+> This version includes a runnable interpreter and RackUnit test coverage.
 
 ## Features
 **Implemented:**
 - Integer, string, and boolean values
-- Arithmetic, comparison, equality, and boolean operators
-- Variable declarations and assignments
-- If expressions, sequences, and while loops
-- First-class functions and function calls
-- Pointer-style address, dereference, and pointer assignment operations
-- Struct creation, field lookup, and field assignment
-- Dynamic allocation and freeing through `malloc`/`free`-style expressions
+- Variables through environment/store bindings
+- Mutation with `:=`
+- `if`, `fn`, `given`, and function calls
+- Primitive operations including arithmetic, comparison, equality, strings, input/output, sequencing, and concatenation
+- Array creation, indexing, and mutation with `make-array`, `array`, `aref`, and `aset!`
+- Higher-order examples for `while` and `in-order`
 - RackUnit tests in `Assignment8.rkt`
 
